@@ -1,7 +1,6 @@
 #pragma once
 #include "enums.hpp"
 #include "types.hpp"
-#include <memory>
 #include <string>
 #include <vector>
 
@@ -9,10 +8,10 @@ namespace SimpleMatchingEngine {
     class Order final
     {
     public:
-        static Order insert(const std::vector<std::string> &tokens, TimeStampType timestamp);
-        static Order amend(const std::vector<std::string> &tokens, TimeStampType timestamp);
-        static Order pull(const std::vector<std::string> &tokens, TimeStampType timestamp);
-        Order(OrderIdType order_id, SymbolType symbol, Side side, PriceType price, VolumeType volume, TimeStampType timestamp);
+        static Order insert(const std::vector<std::string> &tokens, SequenceType sequence);
+        static Order amend(const std::vector<std::string> &tokens, SequenceType sequence);
+        static Order pull(const std::vector<std::string> &tokens, SequenceType sequence);
+        Order(OrderIdType order_id, SymbolType symbol, Side side, PriceType price, VolumeType volume, SequenceType sequence);
 
         OrderIdType get_order_id() const noexcept {
             return order_id_;
@@ -50,33 +49,32 @@ namespace SimpleMatchingEngine {
             volume_ = new_volume;
         }
 
-        void reduce_volume(VolumeType other)
-        {
+        void reduce_volume(VolumeType other) noexcept {
             volume_ -= other;
         }
 
-        void set_timestamp(TimeStampType new_timestamp) noexcept {
-            timestamp_ = new_timestamp;
+        void set_sequence(SequenceType new_sequence) noexcept {
+            sequence_ = new_sequence;
         }
 
+        // The order that reached the book last is the aggressor
         bool is_aggressor(const Order &other) const noexcept {
-            if (timestamp_ > other.timestamp_)
-                return true;
-
-            return false;
+            return sequence_ > other.sequence_;
         }
 
     private:
-        static PriceType validate_price(const std::string &price);
-        static VolumeType validate_volume(const std::string &volume);
+        static void validate_token_count(const std::vector<std::string> &tokens, std::size_t expected);
+        static int parse_int(const std::string &value, const char *field);
+        static PriceType parse_price(const std::string &price);
+        static VolumeType parse_volume(const std::string &volume);
         static Side side_from_string(const std::string &side);
 
     private:
         OrderIdType order_id_;
         Unqualified<SymbolType> symbol_;
         Side side_;
-        Unqualified<PriceType> price_;
+        PriceType price_;
         VolumeType volume_;
-        TimeStampType timestamp_;
+        SequenceType sequence_;
     };
 }

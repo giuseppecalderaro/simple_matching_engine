@@ -17,7 +17,7 @@ enable_testing()
 
 # Sub directories
 add_subdirectory(${PROJECT_SOURCE_DIR}/src)
-# add_subdirectory(${PROJECT_SOURCE_DIR}/test)
+add_subdirectory(${PROJECT_SOURCE_DIR}/test)
 
 # Include directories
 include_directories(${PROJECT_SOURCE_DIR}/include)

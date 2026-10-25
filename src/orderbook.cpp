@@ -1,25 +1,21 @@
 #include "orderbook.hpp"
 #include "order.hpp"
 #include "types.hpp"
-#include <numeric>
+#include <sstream>
+#include <stdexcept>
 
 namespace SimpleMatchingEngine {
-    Orderbook::Orderbook(OrdersMapType *orders_by_id_, std::vector<std::string> &trades)
-      : orders_by_id_(orders_by_id_), trades_(trades)
+    Orderbook::Orderbook(OrdersMapType *orders_by_id_)
+      : orders_by_id_(orders_by_id_)
     {
         if (!orders_by_id_)
             throw std::runtime_error("orders_by_id_ cannot be nullptr");
     }
 
-    void Orderbook::process_insert_order(const Order &order)
+    void Orderbook::process_insert_order(const Order &order, std::vector<std::string> &trades)
     {
         order.is_buy() ? insert_order(order, bids_) : insert_order(order, asks_);
-        uncross_book();
-    }
-
-    void Orderbook::process_amend_order(const Order &order)
-    {
-        uncross_book();
+        uncross_book(trades);
     }
 
     void Orderbook::process_pull_order(const Order &order)
@@ -28,18 +24,15 @@ namespace SimpleMatchingEngine {
         // No need to uncross the book when pulling an order
     }
 
-    std::vector<std::string> Orderbook::print_levels() const noexcept {
+    std::vector<std::string> Orderbook::print_levels() const
+    {
         std::vector<std::string> ret;
 
         for (auto bid_iter = bids_.begin(), ask_iter = asks_.begin(); bid_iter != bids_.end() || ask_iter != asks_.end(); ) {
             std::ostringstream oss;
 
             if (bid_iter != bids_.end()) {
-                auto bid_total_volume = std::accumulate(bid_iter->second.begin(), bid_iter->second.end(), 0, [this](int sum, const OrderIdType &order_id) {
-                    const auto &order = get_order(order_id);
-                    return sum + order.get_volume();
-                });
-                oss << bid_iter->first << "," << bid_total_volume;
+                oss << format_price(bid_iter->first) << "," << level_volume(*bid_iter);
                 bid_iter = std::next(bid_iter);
             } else {
                 oss << ",";
@@ -48,11 +41,7 @@ namespace SimpleMatchingEngine {
             oss << ",";
 
             if (ask_iter != asks_.end()) {
-                auto ask_total_volume = std::accumulate(ask_iter->second.begin(), ask_iter->second.end(), 0, [this](int sum, const OrderIdType &order_id) {
-                    const auto &order = get_order(order_id);
-                    return sum + order.get_volume();
-                });
-                oss << ask_iter->first << "," << ask_total_volume;
+                oss << format_price(ask_iter->first) << "," << level_volume(*ask_iter);
                 ask_iter = std::next(ask_iter);
             } else {
                 oss << ",";
@@ -64,100 +53,34 @@ namespace SimpleMatchingEngine {
         return ret;
     }
 
-    void Orderbook::uncross_book() noexcept
+    void Orderbook::uncross_book(std::vector<std::string> &trades)
     {
-        // Need to check if price levels are crossed
-        auto bid_level = bids_.begin();
-        auto ask_level = asks_.begin();
+        // Match the front orders of the best levels until one side is empty or the book is uncrossed
+        while (!bids_.empty() && !asks_.empty()) {
+            const auto &bid_level = *bids_.begin();
+            const auto &ask_level = *asks_.begin();
 
-        while (true) {
-            if (bid_level == bids_.end() || ask_level == asks_.end()) {
-                // One of the two sides is empty, just return
+            if (bid_level.first < ask_level.first)
                 return;
-            }
 
-            const auto &bid_price = bid_level->first;
-            const auto &ask_price = ask_level->first;
+            auto &bid_order = get_order(bid_level.second.front());
+            auto &ask_order = get_order(ask_level.second.front());
+            const auto traded_volume = std::min(bid_order.get_volume(), ask_order.get_volume());
 
-            if (bid_price < ask_price) {
-                // The book is now uncrossed
-                return;
-            }
+            trades.push_back(publish_trade(bid_order, ask_order, traded_volume));
 
-            if (bid_price >= ask_price) {
-                auto bid_order_iter = bid_level->second.begin();
-                auto ask_order_iter = ask_level->second.begin();
+            bid_order.reduce_volume(traded_volume);
+            ask_order.reduce_volume(traded_volume);
 
-                while(true) {
-                    auto &bid_order = get_order(*bid_order_iter);
-                    const auto bid_order_volume = bid_order.get_volume();
+            // Check both before removing anything, removing an order invalidates its reference
+            const bool bid_filled = bid_order.get_volume() == 0;
+            const bool ask_filled = ask_order.get_volume() == 0;
 
-                    auto &ask_order = get_order(*ask_order_iter);
-                    const auto ask_order_volume = ask_order.get_volume();
+            if (bid_filled)
+                remove_filled_order(bids_);
 
-                    // Publish a trade
-                    trades_.push_back(publish_trade(bid_order, ask_order));
-
-                    if (bid_order_volume > ask_order_volume) {
-                        // We need to:
-                        // 1. Reduce the available volume on the bid order
-                        bid_order.reduce_volume(ask_order_volume);
-
-                        // 2. Remove the ask order
-                        ask_order_iter = ask_level->second.erase(ask_order_iter);
-                        orders_by_id_->erase(ask_order.get_order_id());
-
-                        // 3. Check the next ask order level
-                        if (ask_level->second.empty()) {
-                            ask_level = asks_.erase(ask_level);
-                            break;
-                        }
-                    }
-
-                    if (bid_order_volume == ask_order_volume) {
-                        // We need to:
-                        // 1. Remove the bid order
-                        bid_order_iter = bid_level->second.erase(bid_order_iter);
-
-                        // 2. Remove the ask order
-                        ask_order_iter = ask_level->second.erase(ask_order_iter);
-
-                        // 3. Check the next bid and ask order levels
-                        bool need_to_break = false;
-                        if (bid_level->second.empty()) {
-                            bid_level = bids_.erase(bid_level);
-                            orders_by_id_->erase(bid_order.get_order_id());
-                            need_to_break = true;
-                        }
-
-                        if (ask_level->second.empty()) {
-                            ask_level = asks_.erase(ask_level);
-                            orders_by_id_->erase(ask_order.get_order_id());
-                            need_to_break = true;
-                        }
-
-                        if (need_to_break)
-                            break;
-                    }
-
-                    if (bid_order_volume < ask_order_volume) {
-                        // We need to:
-                        // 1. Reduce the available volume on the ask order
-                        ask_order.reduce_volume(bid_order_volume);
-
-                        // 2. Remove the bid order
-                        bid_order_iter = bid_level->second.erase(bid_order_iter);
-
-                        // 3. Check the next bid order level
-                        if (bid_level->second.empty()) {
-                            bid_level = bids_.erase(bid_level);
-                            orders_by_id_->erase(bid_order.get_order_id());
-                            break;
-                        }
-                    }
-                }
-
-            }
+            if (ask_filled)
+                remove_filled_order(asks_);
         }
     }
 
@@ -172,12 +95,13 @@ namespace SimpleMatchingEngine {
         throw std::runtime_error(oss.str());
     }
 
-    std::string Orderbook::publish_trade(const Order &bid, const Order &ask) {
+    std::string Orderbook::publish_trade(const Order &bid, const Order &ask, VolumeType volume)
+    {
         const auto &aggressor = bid.is_aggressor(ask) ? bid : ask;
         const auto &passive = bid.is_aggressor(ask) ? ask : bid;
 
         std::ostringstream oss;
-        oss << passive.get_symbol() << "," << passive.get_price() << "," << std::min(bid.get_volume(), ask.get_volume()) << "," << aggressor.get_order_id() << "," << passive.get_order_id();
+        oss << passive.get_symbol() << "," << format_price(passive.get_price()) << "," << volume << "," << aggressor.get_order_id() << "," << passive.get_order_id();
         return oss.str();
     }
 }

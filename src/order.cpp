@@ -1,63 +1,121 @@
 #include "order.hpp"
 #include "enums.hpp"
-#include <memory>
+#include <algorithm>
+#include <cctype>
+#include <charconv>
 #include <sstream>
-#include <boost/algorithm/string.hpp>
+#include <stdexcept>
 
 namespace SimpleMatchingEngine {
-    Order Order::insert(const std::vector<std::string> &tokens, TimeStampType timestamp)
+    namespace {
+        // Integer part digits allowed in a price, keeps the fixed point value far from overflowing
+        constexpr std::size_t MAX_PRICE_INTEGER_DIGITS = 12;
+
+        bool all_digits(const std::string &value)
+        {
+            return std::all_of(value.begin(), value.end(), [](unsigned char c) { return std::isdigit(c); });
+        }
+    }
+
+    Order Order::insert(const std::vector<std::string> &tokens, SequenceType sequence)
     {
-        auto price = validate_price(tokens[4]);
-        auto volume = validate_volume(tokens[5]);
-        return Order(std::stoi(tokens[1]), // Order id
+        validate_token_count(tokens, 6);
+
+        if (tokens[2].empty())
+            throw std::runtime_error("Symbol cannot be empty");
+
+        auto volume = parse_volume(tokens[5]);
+        if (volume == 0)
+            throw std::runtime_error("Volume of a new order cannot be zero");
+
+        return Order(parse_int(tokens[1], "order id"),
                      tokens[2], // symbol
                      Order::side_from_string(tokens[3]),
-                     price,
+                     parse_price(tokens[4]),
                      volume,
-                     timestamp);
+                     sequence);
     }
 
-    Order Order::amend(const std::vector<std::string> &tokens, TimeStampType timestamp)
+    Order Order::amend(const std::vector<std::string> &tokens, SequenceType sequence)
     {
-        auto price = validate_price(tokens[2]);
-        auto volume = validate_volume(tokens[3]);
-        return Order(std::stoi(tokens[1]), // Order id
+        validate_token_count(tokens, 4);
+
+        return Order(parse_int(tokens[1], "order id"),
                      "", // symbol
                      Side::UNKNOWN,
-                     price,
-                     volume,
-                     timestamp);
+                     parse_price(tokens[2]),
+                     parse_volume(tokens[3]),
+                     sequence);
     }
 
-    Order Order::pull(const std::vector<std::string> &tokens, TimeStampType timestamp)
+    Order Order::pull(const std::vector<std::string> &tokens, SequenceType sequence)
     {
-        return Order(std::stoi(tokens[1]), // Order id
+        validate_token_count(tokens, 2);
+
+        return Order(parse_int(tokens[1], "order id"),
                      "", // symbol
                      Side::UNKNOWN,
-                     convert_price<PriceType>("0"), // price
+                     0, // price
                      0, // volume
-                     timestamp);
+                     sequence);
     }
 
-    Order::Order(OrderIdType order_id, SymbolType symbol, Side side, PriceType price, VolumeType volume, TimeStampType timestamp)
-        : order_id_(order_id), symbol_(symbol), side_(side), price_(price), volume_(volume), timestamp_(timestamp)
+    Order::Order(OrderIdType order_id, SymbolType symbol, Side side, PriceType price, VolumeType volume, SequenceType sequence)
+        : order_id_(order_id), symbol_(symbol), side_(side), price_(price), volume_(volume), sequence_(sequence)
     {}
 
-    PriceType Order::validate_price(const std::string &price)
+    void Order::validate_token_count(const std::vector<std::string> &tokens, std::size_t expected)
     {
-        auto found = price.find_last_of(".");
-        if (found != std::string::npos && price.substr(found + 1).size() > 4) {
+        if (tokens.size() != expected) {
+            std::ostringstream oss;
+            oss << tokens[0] << " expects " << expected << " fields, got " << tokens.size();
+            throw std::runtime_error(oss.str());
+        }
+    }
+
+    int Order::parse_int(const std::string &value, const char *field)
+    {
+        int ret = 0;
+        auto [ptr, ec] = std::from_chars(value.data(), value.data() + value.size(), ret);
+        if (value.empty() || ec != std::errc() || ptr != value.data() + value.size()) {
+            std::ostringstream oss;
+            oss << "Cannot decode " << field << ": " << value;
+            throw std::runtime_error(oss.str());
+        }
+
+        return ret;
+    }
+
+    PriceType Order::parse_price(const std::string &price)
+    {
+        const auto dot = price.find('.');
+        const auto integer_part = price.substr(0, dot);
+        const auto fractional_part = dot == std::string::npos ? std::string() : price.substr(dot + 1);
+
+        if (integer_part.empty() || integer_part.size() > MAX_PRICE_INTEGER_DIGITS || !all_digits(integer_part)
+            || (dot != std::string::npos && fractional_part.empty())
+            || fractional_part.size() > PRICE_DECIMALS || !all_digits(fractional_part)) {
             std::ostringstream oss;
             oss << "Price: " << price << " is not in a valid format";
             throw std::runtime_error(oss.str());
         }
 
-        return convert_price<PriceType>(price);
+        auto padded_fractional = fractional_part;
+        padded_fractional.append(PRICE_DECIMALS - fractional_part.size(), '0');
+
+        const PriceType ret = std::stoll(integer_part) * PRICE_SCALE + std::stoll(padded_fractional);
+        if (ret == 0) {
+            std::ostringstream oss;
+            oss << "Price: " << price << " must be positive";
+            throw std::runtime_error(oss.str());
+        }
+
+        return ret;
     }
 
-    VolumeType Order::validate_volume(const std::string &vol_string)
+    VolumeType Order::parse_volume(const std::string &vol_string)
     {
-        VolumeType volume = std::stoi(vol_string);
+        VolumeType volume = parse_int(vol_string, "volume");
         if (volume < 0) {
             std::ostringstream oss;
             oss << "Volume: " << volume << " cannot be negative";
@@ -76,7 +134,7 @@ namespace SimpleMatchingEngine {
             return Side::SELL;
 
         std::ostringstream oss;
-        oss << "Cannot decode side: " << side << std::endl;
+        oss << "Cannot decode side: " << side;
         throw std::runtime_error(oss.str());
     }
 }
